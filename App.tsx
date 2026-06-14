@@ -849,43 +849,76 @@ function DetailSection({ title, items, highlight }) {
 }
 
 // ====== ADMIN DASHBOARD ======
-function AdminDashboard({ onBack }: { onBack: () => void }) {
-  const [responses, setResponses] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [selectedDoctor, setSelectedDoctor] = useState(null);
-  const [confirmDelete, setConfirmDelete] = useState(null);
+// ── Google Sheet config ─────────────────────────────────────────────────────
+const SHEET_ID = '1ThmNKL6QGF7wGqXebGSjcbkbd9pkrlzCLfllw5rYuPc';
+const SHEET_NAME = 'Sheet1'; // change if your tab has a different name
+const SHEET_URL = `https://docs.google.com/spreadsheets/d/${SHEET_ID}/gviz/tq?tqx=out:json&sheet=${encodeURIComponent(SHEET_NAME)}`;
 
-  useEffect(() => {
-    (async () => {
-      const all = [];
-      for (const doc of DOCTORS) {
-        try {
-          const r = await window.storage.get(`${STORAGE_KEY}:${doc.id}`, true);
-          if (r && r.value) all.push(JSON.parse(r.value));
-        } catch (e) {}
-      }
-      setResponses(all);
+function parseSheetResponse(raw: string) {
+  // Google wraps the JSON in /*O_o*/ google.visualization.Query.setResponse({...});
+  const json = raw.replace(/^[^(]+\(/, '').replace(/\);?$/, '');
+  const data = JSON.parse(json);
+  const rows = data.table.rows;
+  return rows.map((row: any) => {
+    const c = row.c;
+    const get = (i: number) => (c[i] && c[i].v != null ? String(c[i].v) : '');
+    const getArr = (i: number) => get(i).split(' | ').filter(Boolean);
+    return {
+      submittedAt:      get(0),
+      doctorId:         get(1),
+      doctorName:       get(2),
+      doctorTitle:      get(3),
+      specialty:        get(4),   // this is the label e.g. "طب تجميل وليزر"
+      procedures:       getArr(5),
+      customProcedures: getArr(6),
+      devices:          getArr(7),
+      notes:            get(8),
+      proceduresCount:  get(9),
+      devicesCount:     get(10),
+    };
+  });
+}
+
+function AdminDashboard({ onBack }: { onBack: () => void }) {
+  const [responses, setResponses] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [selectedDoctor, setSelectedDoctor] = useState<any>(null);
+  const [lastRefresh, setLastRefresh] = useState<Date>(new Date());
+
+  const fetchFromSheet = async () => {
+    setLoading(true);
+    setError('');
+    try {
+      const res = await fetch(SHEET_URL);
+      const text = await res.text();
+      const parsed = parseSheetResponse(text);
+      setResponses(parsed);
+      setLastRefresh(new Date());
+    } catch (e) {
+      setError('تعذّر تحميل البيانات. تأكد من أن الجدول مشارك للعموم.');
+    } finally {
       setLoading(false);
-    })();
-  }, []);
+    }
+  };
+
+  useEffect(() => { fetchFromSheet(); }, []);
 
   const exportCSV = () => {
-    const headers = ['اسم الدكتور', 'التخصص', 'المسمى الوظيفي', 'الإجراءات المختارة', 'إجراءات مضافة', 'الأجهزة المختارة', 'ملاحظات', 'تاريخ الإرسال'];
+    const headers = ['تاريخ الإرسال', 'اسم الدكتور', 'التخصص', 'المسمى الوظيفي', 'الإجراءات', 'إجراءات مضافة', 'الأجهزة', 'ملاحظات'];
     const rows = responses.map(r => [
+      r.submittedAt,
       r.doctorName,
-      SPECIALTY_META[r.specialty].label,
+      r.specialty,
       r.doctorTitle,
       r.procedures.join(' | '),
       r.customProcedures.join(' | '),
       r.devices.join(' | '),
       (r.notes || '').replace(/\n/g, ' '),
-      new Date(r.submittedAt).toLocaleString('ar-SA')
     ]);
-
     const csv = [headers, ...rows]
-      .map(row => row.map(cell => `"${String(cell).replace(/"/g, '""')}"`).join(','))
+      .map(row => row.map((cell: string) => `"${String(cell).replace(/"/g, '""')}"`).join(','))
       .join('\n');
-
     const blob = new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
@@ -895,16 +928,13 @@ function AdminDashboard({ onBack }: { onBack: () => void }) {
     URL.revokeObjectURL(url);
   };
 
-  const performDelete = async (doctorId) => {
-    try {
-      await window.storage.delete(`${STORAGE_KEY}:${doctorId}`, true);
-      setResponses(prev => prev.filter(r => r.doctorId !== doctorId));
-      if (selectedDoctor?.doctorId === doctorId) setSelectedDoctor(null);
-      setConfirmDelete(null);
-    } catch (e) {
-      setConfirmDelete(null);
-    }
+  // Delete is handled in Google Sheet directly — we just hide from view locally
+  const performDelete = (doctorId: string) => {
+    setResponses(prev => prev.filter(r => r.doctorId !== doctorId));
+    if (selectedDoctor?.doctorId === doctorId) setSelectedDoctor(null);
   };
+
+  const [confirmDelete, setConfirmDelete] = useState<any>(null);
 
   const completedCount = responses.length;
   const totalCount = DOCTORS.length;
@@ -922,6 +952,14 @@ function AdminDashboard({ onBack }: { onBack: () => void }) {
             >
               خروج
             </button>
+            <div className="flex items-center gap-2">
+            <button
+              onClick={fetchFromSheet}
+              className="px-3 py-1.5 rounded-lg text-xs transition-all hover:opacity-80 flex items-center gap-1"
+              style={{ background: BRAND.maroonDark, color: BRAND.peach }}
+            >
+              ↻ تحديث
+            </button>
             <button
               onClick={exportCSV}
               disabled={responses.length === 0}
@@ -932,15 +970,24 @@ function AdminDashboard({ onBack }: { onBack: () => void }) {
               تحميل CSV
             </button>
           </div>
+          </div>
           <NoyaLogo size={36} />
         </div>
       </div>
 
       <div className="max-w-6xl mx-auto px-6 py-8">
         <h1 className="text-2xl font-bold mb-1" style={{ color: BRAND.maroon }}>لوحة استبيان Q3</h1>
-        <p className="text-sm mb-8" style={{ color: BRAND.textLight }}>
+        <p className="text-sm mb-1" style={{ color: BRAND.textLight }}>
           مراجعة ردود الأطباء على استبيان الخطة الصيفية
         </p>
+        <p className="text-xs mb-6" style={{ color: BRAND.textLight }}>
+          آخر تحديث: {lastRefresh.toLocaleTimeString('ar-SA')} · البيانات من Google Sheets
+        </p>
+        {error && (
+          <div className="mb-4 p-3 rounded-lg text-sm text-center" style={{ background: '#FEE2E2', color: '#B91C1C' }}>
+            {error}
+          </div>
+        )}
 
         <div className="grid grid-cols-2 md:grid-cols-4 gap-4 mb-8">
           <StatCard label="عدد الردود" value={completedCount} icon={Check} color={BRAND.maroon} />
